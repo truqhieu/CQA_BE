@@ -1,0 +1,31 @@
+# Compiled output
+/dist
+/node_modules
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# OS / IDE / Editors
+.DS_Store
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Environments and secrets (NEVER commit secrets!)
+.env
+.env.production
+.env.development
+.env.local
+.env.*.local
+
+# Nest CLI cache
+.nestcli.db
