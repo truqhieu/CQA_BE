@@ -62,6 +62,7 @@ export type InboxRealtimePayload = {
   messages?: InboxMessagePayload[];
   conversation?: InboxConversationPayload;
   intent?: CustomerIntentPayload;
+  tenantId?: string;
 };
 
 @Injectable()

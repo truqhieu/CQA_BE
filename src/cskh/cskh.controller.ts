@@ -19,7 +19,7 @@ import {
 } from '@nestjs/common';
 import type { Response, Request } from 'express';
 import type { RawBodyRequest } from '@nestjs/common';
-import { merge, interval, map, Observable } from 'rxjs';
+import { merge, interval, map, filter, Observable } from 'rxjs';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CskhService } from './cskh.service';
 import { CskhInboxService } from './cskh-inbox.service';
@@ -29,6 +29,11 @@ import { parseMediaProxyUrlFromRequest } from './facebook-message.util';
 import { SapoOAuthService } from './sapo-oauth.service';
 import { SapoProductService } from './sapo-product.service';
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
+import { JwtService } from '@nestjs/jwt';
+import { UsersService } from '../users/users.service';
+import { ConfigService } from '@nestjs/config';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
+import type { User } from '@prisma/client';
 
 @ApiTags('cskh')
 @ApiBearerAuth('JWT-auth')
@@ -40,12 +45,34 @@ export class CskhController {
     private readonly inboxRealtime: CskhInboxRealtimeService,
     private readonly sapoOAuth: SapoOAuthService,
     private readonly sapoProducts: SapoProductService,
+    private readonly jwtService: JwtService,
+    private readonly usersService: UsersService,
+    private readonly configService: ConfigService,
   ) {}
 
   /** OAuth — không cần JWT (redirect browser). */
   @Get('oauth/start')
-  oauthStart(@Query('returnUrl') returnUrl: string, @Res() res: Response) {
-    const url = this.cskh.getOAuthStartUrl(returnUrl);
+  async oauthStart(
+    @Query('returnUrl') returnUrl: string,
+    @Query('token') token: string,
+    @Res() res: Response,
+  ) {
+    let tenantId: string | undefined;
+    if (token) {
+      try {
+        const secret = this.configService.get<string>('jwt.secret');
+        const payload = this.jwtService.verify(token, { secret });
+        if (payload && payload.sub) {
+          const user = await this.usersService.findById(payload.sub);
+          if (user && user.isActive && user.tenantId) {
+            tenantId = user.tenantId;
+          }
+        }
+      } catch (e) {
+        // ignore or log
+      }
+    }
+    const url = this.cskh.getOAuthStartUrl(returnUrl, tenantId);
     return res.redirect(url);
   }
 
@@ -74,13 +101,14 @@ export class CskhController {
 
   @Get('pages')
   @UseGuards(JwtAuthGuard)
-  listPages() {
-    return this.cskh.listPages();
+  listPages(@CurrentUser() user: User) {
+    return this.cskh.listPages(user.tenantId || undefined);
   }
 
   @Put('pages/manual')
   @UseGuards(JwtAuthGuard)
   saveManualPage(
+    @CurrentUser() user: User,
     @Body()
     body: {
       pageId?: string;
@@ -88,35 +116,42 @@ export class CskhController {
       pageAccessToken?: string;
     },
   ) {
-    return this.cskh.savePageConfig({
-      pageId: body.pageId?.trim() ?? '',
-      pageName: body.pageName,
-      pageAccessToken: body.pageAccessToken ?? '',
-    });
+    return this.cskh.savePageConfig(
+      {
+        pageId: body.pageId?.trim() ?? '',
+        pageName: body.pageName,
+        pageAccessToken: body.pageAccessToken ?? '',
+      },
+      user.tenantId || undefined,
+    );
   }
 
   @Patch('pages/bulk-enabled')
   @UseGuards(JwtAuthGuard)
-  setPagesEnabledBulk(@Body() body: { enabled?: boolean; pageIds?: string[] }) {
-    return this.cskh.setPagesEnabledBulk(Boolean(body.enabled), body.pageIds);
+  setPagesEnabledBulk(@CurrentUser() user: User, @Body() body: { enabled?: boolean; pageIds?: string[] }) {
+    return this.cskh.setPagesEnabledBulk(Boolean(body.enabled), body.pageIds, user.tenantId || undefined);
   }
 
   @Patch('pages/:pageId/enabled')
   @UseGuards(JwtAuthGuard)
-  setPageEnabled(@Param('pageId') pageId: string, @Body() body: { enabled?: boolean }) {
-    return this.cskh.setPageEnabled(pageId, Boolean(body.enabled));
+  setPageEnabled(
+    @CurrentUser() user: User,
+    @Param('pageId') pageId: string,
+    @Body() body: { enabled?: boolean },
+  ) {
+    return this.cskh.setPageEnabled(pageId, Boolean(body.enabled), user.tenantId || undefined);
   }
 
   @Delete('pages/:pageId')
   @UseGuards(JwtAuthGuard)
-  deletePage(@Param('pageId') pageId: string) {
-    return this.cskh.deletePage(pageId);
+  deletePage(@CurrentUser() user: User, @Param('pageId') pageId: string) {
+    return this.cskh.deletePage(pageId, user.tenantId || undefined);
   }
 
   @Post('oauth/refresh')
   @UseGuards(JwtAuthGuard)
-  refreshOAuth() {
-    return this.cskh.refreshPagesFromOAuth();
+  refreshOAuth(@CurrentUser() user: User) {
+    return this.cskh.refreshPagesFromOAuth(user.tenantId || undefined);
   }
 
   /** Sapo Partner OAuth — redirect browser (cài Client lên shop). */
@@ -175,18 +210,18 @@ export class CskhController {
 
   @Get('monitor/latest')
   @UseGuards(JwtAuthGuard)
-  latestMonitor() {
-    return this.cskh.getLatestMonitor();
+  latestMonitor(@CurrentUser() user: User) {
+    return this.cskh.getLatestMonitor(user.tenantId || undefined);
   }
 
   @Post('monitor/run')
   @UseGuards(JwtAuthGuard)
-  async runMonitor(@Body() body: { maxConversations?: number }) {
-    const running = await this.cskh.findRunningJob('monitor');
+  async runMonitor(@CurrentUser() user: User, @Body() body: { maxConversations?: number }) {
+    const running = await this.cskh.findRunningJob('monitor', user.tenantId || undefined);
     if (running) {
       return { jobId: running.id, status: 'running', alreadyRunning: true };
     }
-    const job = await this.cskh.createJob('monitor');
+    const job = await this.cskh.createJob('monitor', user.tenantId || undefined);
     void this.cskh.runMonitorJob(job.id, body.maxConversations);
     return { jobId: job.id, status: 'running', alreadyRunning: false };
   }
@@ -194,6 +229,7 @@ export class CskhController {
   @Post('audit/run')
   @UseGuards(JwtAuthGuard)
   async runAudit(
+    @CurrentUser() user: User,
     @Body()
     body: {
       auditDate?: string;
@@ -224,15 +260,15 @@ export class CskhController {
         ? Math.floor(body.maxConversations)
         : undefined;
     if (body.force) {
-      await this.cskh.cancelRunningJobs('audit');
+      await this.cskh.cancelRunningJobs('audit', undefined, user.tenantId || undefined);
     } else {
-      await this.cskh.releaseStaleJobs('audit', 5 * 60 * 1000);
+      await this.cskh.releaseStaleJobs('audit', 5 * 60 * 1000, user.tenantId || undefined);
     }
-    const running = await this.cskh.findRunningJob('audit');
+    const running = await this.cskh.findRunningJob('audit', user.tenantId || undefined);
     if (running) {
       return { jobId: running.id, status: 'running', alreadyRunning: true };
     }
-    const job = await this.cskh.createJob('audit');
+    const job = await this.cskh.createJob('audit', user.tenantId || undefined);
     void this.cskh.runAuditJob(job.id, {
       auditDateFrom,
       auditDateTo,
@@ -245,14 +281,14 @@ export class CskhController {
 
   @Post('audit/pause')
   @UseGuards(JwtAuthGuard)
-  pauseAudit() {
-    return this.cskh.requestAuditPause();
+  pauseAudit(@CurrentUser() user: User) {
+    return this.cskh.requestAuditPause(user.tenantId || undefined);
   }
 
   @Post('audit/cancel')
   @UseGuards(JwtAuthGuard)
-  async cancelAudit() {
-    const n = await this.cskh.cancelRunningJobs('audit');
+  async cancelAudit(@CurrentUser() user: User) {
+    const n = await this.cskh.cancelRunningJobs('audit', undefined, user.tenantId || undefined);
     return { cancelled: n };
   }
 
@@ -264,28 +300,29 @@ export class CskhController {
 
   @Get('audit/progress/:jobId')
   @UseGuards(JwtAuthGuard)
-  getAuditProgress(@Param('jobId') jobId: string) {
-    return this.cskh.getAuditProgress(jobId);
+  getAuditProgress(@CurrentUser() user: User, @Param('jobId') jobId: string) {
+    return this.cskh.getAuditProgress(jobId, user.tenantId || undefined);
   }
 
   @Get('jobs/running/:type')
   @UseGuards(JwtAuthGuard)
-  getRunningJob(@Param('type') type: string) {
+  getRunningJob(@CurrentUser() user: User, @Param('type') type: string) {
     if (type !== 'monitor' && type !== 'audit') {
       return null;
     }
-    return this.cskh.getRunningJob(type);
+    return this.cskh.getRunningJob(type, user.tenantId || undefined);
   }
 
   @Get('jobs/:id')
   @UseGuards(JwtAuthGuard)
-  getJob(@Param('id') id: string) {
-    return this.cskh.getJob(id);
+  getJob(@CurrentUser() user: User, @Param('id') id: string) {
+    return this.cskh.getJob(id, user.tenantId || undefined);
   }
 
   @Get('audits')
   @UseGuards(JwtAuthGuard)
   listAudits(
+    @CurrentUser() user: User,
     @Query('pageId') pageId?: string,
     @Query('jobRunId') jobRunId?: string,
     @Query('auditDate') auditDate?: string,
@@ -293,19 +330,23 @@ export class CskhController {
     @Query('auditDateTo') auditDateTo?: string,
     @Query('limit') limit?: string,
   ) {
-    return this.cskh.listAudits({
-      pageId: pageId?.trim(),
-      jobRunId: jobRunId?.trim(),
-      auditDate: auditDate?.trim(),
-      auditDateFrom: auditDateFrom?.trim(),
-      auditDateTo: auditDateTo?.trim(),
-      limit: limit ? Number(limit) : undefined,
-    });
+    return this.cskh.listAudits(
+      {
+        pageId: pageId?.trim(),
+        jobRunId: jobRunId?.trim(),
+        auditDate: auditDate?.trim(),
+        auditDateFrom: auditDateFrom?.trim(),
+        auditDateTo: auditDateTo?.trim(),
+        limit: limit ? Number(limit) : undefined,
+      },
+      user.tenantId || undefined,
+    );
   }
 
   @Get('audits/day-stats')
   @UseGuards(JwtAuthGuard)
   getAuditDayStats(
+    @CurrentUser() user: User,
     @Query('auditDate') auditDate?: string,
     @Query('auditDateFrom') auditDateFrom?: string,
     @Query('auditDateTo') auditDateTo?: string,
@@ -313,12 +354,13 @@ export class CskhController {
   ) {
     const from = (auditDateFrom || auditDate)?.trim();
     if (!from) throw new BadRequestException('Bắt buộc auditDateFrom hoặc auditDate (YYYY-MM-DD)');
-    return this.cskh.getAuditDayStats(from, auditDateTo?.trim(), pageId?.trim());
+    return this.cskh.getAuditDayStats(from, auditDateTo?.trim(), pageId?.trim(), user.tenantId || undefined);
   }
 
   @Get('audits/comparison')
   @UseGuards(JwtAuthGuard)
   getAuditComparison(
+    @CurrentUser() user: User,
     @Query('auditDate') auditDate?: string,
     @Query('auditId') auditId?: string,
   ) {
@@ -326,15 +368,15 @@ export class CskhController {
     const id = auditId?.trim();
     if (!day) throw new BadRequestException('Bắt buộc auditDate (YYYY-MM-DD)');
     if (!id) throw new BadRequestException('Bắt buộc auditId');
-    return this.cskh.getAuditComparisonStats(day, id);
+    return this.cskh.getAuditComparisonStats(day, id, user.tenantId || undefined);
   }
 
   @Get('audits/score-history')
   @UseGuards(JwtAuthGuard)
-  getAuditScoreHistory(@Query('auditId') auditId?: string) {
+  getAuditScoreHistory(@CurrentUser() user: User, @Query('auditId') auditId?: string) {
     const id = auditId?.trim();
     if (!id) throw new BadRequestException('Bắt buộc auditId');
-    return this.cskh.getAuditScoreHistory(id);
+    return this.cskh.getAuditScoreHistory(id, user.tenantId || undefined);
   }
 
   @Get('ai/balance')
@@ -368,23 +410,32 @@ export class CskhController {
 
   @Get('inbox/conversations')
   @UseGuards(JwtAuthGuard)
-  listInboxConversations(@Query('pageId') pageId?: string) {
-    return this.inbox.listConversations(pageId?.trim());
+  listInboxConversations(@CurrentUser() user: User, @Query('pageId') pageId?: string) {
+    return this.inbox.listConversations(pageId?.trim(), user.tenantId || undefined);
   }
 
   /** SSE — push realtime khi webhook/send có tin mới (FE không cần bấm đồng bộ). */
   @Sse('inbox/stream')
   @UseGuards(JwtAuthGuard)
-  inboxStream(): Observable<MessageEvent> {
+  inboxStream(@CurrentUser() user: User): Observable<MessageEvent> {
     const heartbeat = interval(25_000).pipe(
       map(() => ({ data: { type: 'ping' } }) as MessageEvent),
     );
-    return merge(this.inboxRealtime.stream(), heartbeat);
+    const tenantId = user.tenantId || undefined;
+    const filteredStream = this.inboxRealtime.stream().pipe(
+      filter((event) => {
+        const payload = event.data as any;
+        if (!payload || !payload.tenantId) return true;
+        return payload.tenantId === tenantId;
+      }),
+    );
+    return merge(filteredStream, heartbeat);
   }
 
   @Get('inbox/conversations/:id/messages')
   @UseGuards(JwtAuthGuard)
   getInboxMessages(
+    @CurrentUser() user: User,
     @Param('id') id: string,
     @Query('since') since?: string,
     @Query('refresh') refresh?: string,
@@ -397,6 +448,7 @@ export class CskhController {
       since?.trim(),
       forceRefresh,
       Number.isFinite(parsedLimit) ? parsedLimit : undefined,
+      user.tenantId || undefined,
     );
   }
 
@@ -408,44 +460,52 @@ export class CskhController {
 
   @Get('inbox/conversations/:id/intent')
   @UseGuards(JwtAuthGuard)
-  getInboxCustomerIntent(@Param('id') id: string, @Query('auditId') auditId?: string) {
-    return this.inbox.getCustomerIntent(id.trim(), auditId?.trim());
+  getInboxCustomerIntent(
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @Query('auditId') auditId?: string,
+  ) {
+    return this.inbox.getCustomerIntent(id.trim(), auditId?.trim(), user.tenantId || undefined);
   }
 
   @Post('inbox/conversations/:id/send')
   @UseGuards(JwtAuthGuard)
-  sendInboxMessage(@Param('id') id: string, @Body() body: { text?: string }) {
-    return this.inbox.sendMessage(id, body.text ?? '');
+  sendInboxMessage(
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @Body() body: { text?: string },
+  ) {
+    return this.inbox.sendMessage(id, body.text ?? '', user.tenantId || undefined);
   }
 
   @Post('inbox/conversations/:id/typing')
   @UseGuards(JwtAuthGuard)
-  notifyInboxTyping(@Param('id') id: string) {
-    return this.inbox.notifyTyping(id);
+  notifyInboxTyping(@CurrentUser() user: User, @Param('id') id: string) {
+    return this.inbox.notifyTyping(id, user.tenantId || undefined);
   }
 
   @Post('inbox/conversations/:id/mark-as-read')
   @UseGuards(JwtAuthGuard)
-  markInboxAsRead(@Param('id') id: string) {
-    return this.inbox.markAsRead(id);
+  markInboxAsRead(@CurrentUser() user: User, @Param('id') id: string) {
+    return this.inbox.markAsRead(id, user.tenantId || undefined);
   }
 
   @Post('inbox/sync')
   @UseGuards(JwtAuthGuard)
-  syncInbox(@Body() body: { pageId?: string }) {
-    return this.inbox.syncFromGraph(body.pageId?.trim());
+  syncInbox(@CurrentUser() user: User, @Body() body: { pageId?: string }) {
+    return this.inbox.syncFromGraph(body.pageId?.trim(), user.tenantId || undefined);
   }
 
   @Post('inbox/link-audit')
   @UseGuards(JwtAuthGuard)
-  linkAuditInbox(@Body() body: { auditId?: string }) {
-    return this.inbox.linkFromAudit(body.auditId?.trim() ?? '');
+  linkAuditInbox(@CurrentUser() user: User, @Body() body: { auditId?: string }) {
+    return this.inbox.linkFromAudit(body.auditId?.trim() ?? '', user.tenantId || undefined);
   }
 
   @Get('inbox/conversations/:id/audit-hint')
   @UseGuards(JwtAuthGuard)
-  getInboxAuditHint(@Param('id') id: string) {
-    return this.inbox.getLatestAuditForConversation(id);
+  getInboxAuditHint(@CurrentUser() user: User, @Param('id') id: string) {
+    return this.inbox.getLatestAuditForConversation(id, user.tenantId || undefined);
   }
 
   /** Proxy avatar Facebook CDN — public (img không gửi JWT). */

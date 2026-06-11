@@ -40,13 +40,13 @@ function oauthStateSecret(): string {
   );
 }
 
-export function signOAuthState(payload: { returnUrl: string; nonce: string }): string {
+export function signOAuthState(payload: { returnUrl: string; tenantId?: string; nonce: string }): string {
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const sig = createHmac('sha256', oauthStateSecret()).update(body).digest('base64url');
   return `${body}.${sig}`;
 }
 
-export function verifyOAuthState(state: string): { returnUrl: string; nonce: string } | null {
+export function verifyOAuthState(state: string): { returnUrl: string; tenantId?: string; nonce: string } | null {
   const [body, sig] = state.split('.');
   if (!body || !sig) return null;
   const expected = createHmac('sha256', oauthStateSecret()).update(body).digest('base64url');
@@ -58,12 +58,13 @@ export function verifyOAuthState(state: string): { returnUrl: string; nonce: str
   }
 }
 
-export function buildFacebookOAuthUrl(returnUrl: string): string {
+export function buildFacebookOAuthUrl(returnUrl: string, tenantId?: string): string {
   const appId = getFacebookAppId();
   if (!appId) throw new Error('FB_APP_ID chưa cấu hình trên BE');
   const redirectUri = getFacebookOAuthRedirectUri();
   const state = signOAuthState({
     returnUrl: returnUrl || '',
+    tenantId,
     nonce: randomBytes(16).toString('hex'),
   });
   const params = new URLSearchParams({

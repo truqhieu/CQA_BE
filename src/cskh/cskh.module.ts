@@ -8,9 +8,11 @@ import { SapoProductService } from './sapo-product.service';
 import { SapoOAuthService } from './sapo-oauth.service';
 import { CskhCronService } from './cskh-cron.service';
 import { AiModule } from '../ai/ai.module';
+import { AuthModule } from '../auth/auth.module';
+import { UsersModule } from '../users/users.module';
 
 @Module({
-  imports: [AiModule],
+  imports: [AiModule, AuthModule, UsersModule],
   controllers: [CskhController],
   providers: [
     CskhService,

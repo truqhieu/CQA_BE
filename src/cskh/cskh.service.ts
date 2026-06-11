@@ -79,17 +79,19 @@ export class CskhService implements OnModuleInit {
     }
   }
 
-  async cancelRunningJobs(type: 'monitor' | 'audit', reason = 'Đã hủy bởi người dùng') {
+  async cancelRunningJobs(type: 'monitor' | 'audit', reason = 'Đã hủy bởi người dùng', tenantId?: string) {
+    const where: any = { type, status: 'running' };
+    if (tenantId) where.tenantId = tenantId;
     const result = await this.prisma.cskhJobRun.updateMany({
-      where: { type, status: 'running' },
+      where,
       data: { status: 'failed', error: reason, finishedAt: new Date() },
     });
     return result.count;
   }
 
   /** Tạm dừng audit — chấm xong phần đã quét, lần sau audit cùng ngày sẽ tiếp tục. */
-  async requestAuditPause() {
-    const job = await this.findRunningJob('audit');
+  async requestAuditPause(tenantId?: string) {
+    const job = await this.findRunningJob('audit', tenantId);
     if (!job) {
       return { paused: false, message: 'Không có job audit đang chạy' };
     }
@@ -267,16 +269,16 @@ export class CskhService implements OnModuleInit {
     return `${this.frontendUrl()}/cskh-quality?tab=config`;
   }
 
-  getOAuthStartUrl(returnUrl?: string) {
+  getOAuthStartUrl(returnUrl?: string, tenantId?: string) {
     if (!getFacebookAppId() || !getFacebookAppSecret()) {
       throw new ServiceUnavailableException(
         'Chưa cấu hình FB_APP_ID và FB_APP_SECRET trên BE',
       );
     }
-    return buildFacebookOAuthUrl(returnUrl?.trim() || this.defaultOAuthReturnUrl());
+    return buildFacebookOAuthUrl(returnUrl?.trim() || this.defaultOAuthReturnUrl(), tenantId);
   }
 
-  async listPages() {
+  async listPages(tenantId?: string) {
     type PageListRow = {
       pageId: string;
       pageName: string | null;
@@ -293,6 +295,7 @@ export class CskhService implements OnModuleInit {
     } as const;
 
     let rows: PageListRow[] = await this.prisma.facebookCskhConfig.findMany({
+      where: tenantId ? { tenantId } : undefined,
       orderBy: [{ enabled: 'desc' }, { pageName: 'asc' }],
       select: pageListSelect,
     });
@@ -307,6 +310,7 @@ export class CskhService implements OnModuleInit {
     }
 
     const oauth = await this.prisma.facebookOAuthSession.findFirst({
+      where: tenantId ? { tenantId } : undefined,
       orderBy: { updatedAt: 'desc' },
       select: { fbUserId: true, fbUserName: true, tokenExpiresAt: true, updatedAt: true },
     });
@@ -363,12 +367,15 @@ export class CskhService implements OnModuleInit {
     }
   }
 
-  async savePageConfig(data: {
-    pageId: string;
-    pageName?: string;
-    pageAccessToken: string;
-    metadata?: Record<string, unknown>;
-  }) {
+  async savePageConfig(
+    data: {
+      pageId: string;
+      pageName?: string;
+      pageAccessToken: string;
+      metadata?: Record<string, unknown>;
+    },
+    tenantId?: string,
+  ) {
     const pageId = data.pageId?.trim();
     const token = data.pageAccessToken?.trim();
     if (!pageId || !/^\d+$/.test(pageId)) {
@@ -387,11 +394,13 @@ export class CskhService implements OnModuleInit {
         pageAccessToken: token,
         enabled: true,
         metadata: metadataJson,
+        tenantId,
       },
       update: {
         pageName: data.pageName?.trim() || undefined,
         pageAccessToken: token,
         metadata: metadataJson,
+        tenantId,
       },
     });
 
@@ -408,17 +417,24 @@ export class CskhService implements OnModuleInit {
     };
   }
 
-  async setPageEnabled(pageId: string, enabled: boolean) {
-    const row = await this.prisma.facebookCskhConfig.update({
-      where: { pageId },
+  async setPageEnabled(pageId: string, enabled: boolean, tenantId?: string) {
+    const where = tenantId ? { pageId, tenantId } : { pageId };
+    const result = await this.prisma.facebookCskhConfig.updateMany({
+      where,
       data: { enabled },
     });
-    return { pageId: row.pageId, enabled: row.enabled };
+    if (result.count === 0) {
+      throw new NotFoundException('Không tìm thấy page hoặc không có quyền');
+    }
+    return { pageId, enabled };
   }
 
-  async setPagesEnabledBulk(enabled: boolean, pageIds?: string[]) {
-    const where =
-      pageIds?.length ? { pageId: { in: pageIds.map((id) => id.trim()) } } : {};
+  async setPagesEnabledBulk(enabled: boolean, pageIds?: string[], tenantId?: string) {
+    const ids = pageIds?.map((id) => id.trim()) || [];
+    const where: any = tenantId ? { tenantId } : {};
+    if (ids.length) {
+      where.pageId = { in: ids };
+    }
     const result = await this.prisma.facebookCskhConfig.updateMany({
       where,
       data: { enabled },
@@ -426,8 +442,14 @@ export class CskhService implements OnModuleInit {
     return { updated: result.count, enabled };
   }
 
-  async deletePage(pageId: string) {
-    await this.prisma.facebookCskhConfig.delete({ where: { pageId } });
+  async deletePage(pageId: string, tenantId?: string) {
+    const where = tenantId ? { pageId, tenantId } : { pageId };
+    const result = await this.prisma.facebookCskhConfig.deleteMany({
+      where,
+    });
+    if (result.count === 0) {
+      throw new NotFoundException('Không tìm thấy page hoặc không có quyền');
+    }
     return { ok: true, pageId };
   }
 
@@ -500,6 +522,7 @@ export class CskhService implements OnModuleInit {
       picture?: { data?: { url?: string } };
     }>,
     source: 'oauth' | 'refresh',
+    tenantId?: string,
   ) {
     let saved = 0;
     for (const acc of accounts) {
@@ -526,6 +549,7 @@ export class CskhService implements OnModuleInit {
           pageName: acc.name || null,
           pageAccessToken: acc.access_token,
           enabled: canMessage,
+          tenantId,
           metadata: {
             connectedVia: source,
             tasks: acc.tasks || [],
@@ -536,6 +560,7 @@ export class CskhService implements OnModuleInit {
           pageName: acc.name || undefined,
           pageAccessToken: acc.access_token,
           enabled: canMessage,
+          tenantId,
           metadata: meta,
         },
       });
@@ -554,6 +579,7 @@ export class CskhService implements OnModuleInit {
     const parsed = verifyOAuthState(state);
     if (!parsed) throw new BadRequestException('OAuth state không hợp lệ');
 
+    const tenantId = parsed.tenantId;
     const userAccessToken = await this.exchangeCodeForUserToken(code);
     const meRes = await axios.get(`${GRAPH_BASE}/me`, {
       params: { fields: 'id,name', access_token: userAccessToken },
@@ -576,11 +602,13 @@ export class CskhService implements OnModuleInit {
         fbUserId,
         fbUserName,
         userAccessToken,
+        tenantId,
         metadata: { pageCount: accounts.length } as Prisma.InputJsonValue,
       },
       update: {
         fbUserName,
         userAccessToken,
+        tenantId,
         metadata: {
           pageCount: accounts.length,
           reconnectedAt: new Date().toISOString(),
@@ -588,7 +616,7 @@ export class CskhService implements OnModuleInit {
       },
     });
 
-    const saved = await this.upsertPagesFromAccounts(accounts, 'oauth');
+    const saved = await this.upsertPagesFromAccounts(accounts, 'oauth', tenantId);
     this.logger.log(`Facebook OAuth: ${saved} pages for user ${fbUserName || fbUserId}`);
 
     return {
@@ -598,49 +626,55 @@ export class CskhService implements OnModuleInit {
     };
   }
 
-  async refreshPagesFromOAuth() {
+  async refreshPagesFromOAuth(tenantId?: string) {
     const session = await this.prisma.facebookOAuthSession.findFirst({
+      where: tenantId ? { tenantId } : undefined,
       orderBy: { updatedAt: 'desc' },
     });
     if (!session) {
       throw new NotFoundException('Chưa kết nối OAuth — bấm "Kết nối Facebook" trước');
     }
     const accounts = await this.fetchManagedPages(session.userAccessToken);
-    const saved = await this.upsertPagesFromAccounts(accounts, 'refresh');
+    const saved = await this.upsertPagesFromAccounts(accounts, 'refresh', session.tenantId || tenantId);
     return { pageCount: saved, oauthUser: session.fbUserName || session.fbUserId };
   }
 
-  private async enabledPages(): Promise<EnabledFacebookPage[]> {
+  private async enabledPages(tenantId?: string): Promise<EnabledFacebookPage[]> {
     return this.prisma.facebookCskhConfig.findMany({
-      where: { enabled: true },
+      where: { enabled: true, tenantId: tenantId || undefined },
       orderBy: { pageName: 'asc' },
       select: { pageId: true, pageName: true, pageAccessToken: true },
     });
   }
 
   /** Mọi Page đã kết nối — dùng khi chấm điểm (chọn kênh trên FE). */
-  private async allPages(): Promise<EnabledFacebookPage[]> {
+  private async allPages(tenantId?: string): Promise<EnabledFacebookPage[]> {
     return this.prisma.facebookCskhConfig.findMany({
+      where: tenantId ? { tenantId } : undefined,
       orderBy: { pageName: 'asc' },
       select: { pageId: true, pageName: true, pageAccessToken: true },
     });
   }
 
-  async createJob(type: 'monitor' | 'audit') {
+  async createJob(type: 'monitor' | 'audit', tenantId?: string) {
     const initialSummary =
       type === 'audit'
         ? ({ phase: 'fetch', fetched: 0, pagesProcessed: 0, pagesTotal: 0 } as Prisma.InputJsonValue)
         : undefined;
     return this.prisma.cskhJobRun.create({
-      data: { type, status: 'running', summary: initialSummary },
+      data: { type, status: 'running', summary: initialSummary, tenantId },
     });
   }
 
   /** Hủy job kẹt (vd. user tắt AI service giữa chừng). */
-  async releaseStaleJobs(type: 'monitor' | 'audit', maxAgeMs = 30 * 60 * 1000) {
+  async releaseStaleJobs(type: 'monitor' | 'audit', maxAgeMs = 30 * 60 * 1000, tenantId?: string) {
     const cutoff = new Date(Date.now() - maxAgeMs);
+    const where: any = { type, status: 'running', startedAt: { lt: cutoff } };
+    if (tenantId) {
+      where.tenantId = tenantId;
+    }
     await this.prisma.cskhJobRun.updateMany({
-      where: { type, status: 'running', startedAt: { lt: cutoff } },
+      where,
       data: {
         status: 'failed',
         error: 'Job quá hạn — đã hủy tự động (có thể do AI service bị tắt)',
@@ -649,17 +683,21 @@ export class CskhService implements OnModuleInit {
     });
   }
 
-  async findRunningJob(type: 'monitor' | 'audit') {
+  async findRunningJob(type: 'monitor' | 'audit', tenantId?: string) {
+    const where: any = { type, status: 'running' };
+    if (tenantId) {
+      where.tenantId = tenantId;
+    }
     return this.prisma.cskhJobRun.findFirst({
-      where: { type, status: 'running' },
+      where,
       orderBy: { startedAt: 'desc' },
     });
   }
 
-  async getRunningJob(type: 'monitor' | 'audit') {
-    const running = await this.findRunningJob(type);
+  async getRunningJob(type: 'monitor' | 'audit', tenantId?: string) {
+    const running = await this.findRunningJob(type, tenantId);
     if (!running) return null;
-    return this.getJob(running.id);
+    return this.getJob(running.id, tenantId);
   }
 
   async updateJobProgress(jobId: string, summary: Record<string, unknown>) {
@@ -738,29 +776,32 @@ export class CskhService implements OnModuleInit {
     });
   }
 
-  async getJob(jobId: string) {
-    const job = await this.prisma.cskhJobRun.findUnique({
-      where: { id: jobId },
+  async getJob(jobId: string, tenantId?: string) {
+    const job = await this.prisma.cskhJobRun.findFirst({
+      where: tenantId ? { id: jobId, tenantId } : { id: jobId },
       include: {
         monitorItems: {
-          where: { needsReply: true },
+          where: tenantId ? { needsReply: true, tenantId } : { needsReply: true },
           orderBy: { updatedAt: 'desc' },
         },
       },
     });
-    if (!job) throw new NotFoundException('Job không tồn tại');
+    if (!job) throw new NotFoundException('Job không tồn tại hoặc không có quyền');
     return {
       ...job,
       error: job.error ? toUserFacingError(job.error) : null,
     };
   }
 
-  async getLatestMonitor() {
+  async getLatestMonitor(tenantId?: string) {
     const job = await this.prisma.cskhJobRun.findFirst({
-      where: { type: 'monitor', status: 'done' },
+      where: tenantId ? { type: 'monitor', status: 'done', tenantId } : { type: 'monitor', status: 'done' },
       orderBy: { finishedAt: 'desc' },
       include: {
-        monitorItems: { where: { needsReply: true }, orderBy: { updatedAt: 'desc' } },
+        monitorItems: { 
+          where: tenantId ? { needsReply: true, tenantId } : { needsReply: true }, 
+          orderBy: { updatedAt: 'desc' } 
+        },
       },
     });
     return job;
@@ -817,7 +858,8 @@ export class CskhService implements OnModuleInit {
   async runMonitorJob(jobId: string, maxConversations?: number) {
     const maxFetch = maxConversations ?? this.monitorMax;
     try {
-      const pages = await this.enabledPages();
+      const job = await this.prisma.cskhJobRun.findUnique({ where: { id: jobId } });
+      const pages = await this.enabledPages(job?.tenantId || undefined);
       if (!pages.length) {
         throw new BadRequestException('Chưa có Page nào được bật');
       }
@@ -960,7 +1002,8 @@ export class CskhService implements OnModuleInit {
           ? this.auditMax
           : 0;
     try {
-      let pages = await this.allPages();
+      const job = await this.prisma.cskhJobRun.findUnique({ where: { id: jobId } });
+      let pages = await this.allPages(job?.tenantId || undefined);
       if (!pageId?.trim()) {
         throw new BadRequestException('Bắt buộc chọn kênh (page) để chấm điểm');
       }
@@ -1373,17 +1416,20 @@ export class CskhService implements OnModuleInit {
     };
   }
 
-  async listAudits(params: {
-    pageId?: string;
-    jobRunId?: string;
-    auditDate?: string;
-    auditDateFrom?: string;
-    auditDateTo?: string;
-    limit?: number;
-  }) {
+  async listAudits(
+    params: {
+      pageId?: string;
+      jobRunId?: string;
+      auditDate?: string;
+      auditDateFrom?: string;
+      auditDateTo?: string;
+      limit?: number;
+    },
+    tenantId?: string,
+  ) {
     const limit = Math.min(params.limit ?? 100, 2000);
     if (params.jobRunId) {
-      return this.listAuditsByJobRunId(params.jobRunId, limit);
+      return this.listAuditsByJobRunId(params.jobRunId, limit, tenantId);
     }
 
     const auditDateFrom = (params.auditDateFrom || params.auditDate || '').trim();
@@ -1416,6 +1462,7 @@ export class CskhService implements OnModuleInit {
                   AND COALESCE(metadata->>'auditDateFrom', '') = ''
                 )
               )
+              AND (${tenantId}::uuid IS NULL OR tenant_id = ${tenantId}::uuid)
             ORDER BY created_at DESC
             LIMIT ${limit}
           `
@@ -1431,6 +1478,7 @@ export class CskhService implements OnModuleInit {
                   AND COALESCE(metadata->>'auditDateFrom', '') = ''
                 )
               )
+              AND (${tenantId}::uuid IS NULL OR tenant_id = ${tenantId}::uuid)
             ORDER BY created_at DESC
             LIMIT ${limit}
           `;
@@ -1439,6 +1487,7 @@ export class CskhService implements OnModuleInit {
 
     const filters = [
       ...(pageId ? [{ metadata: { path: ['pageId'], equals: pageId } }] : []),
+      ...(tenantId ? [{ tenantId }] : []),
     ];
 
     const rows = await this.prisma.chatAudit.findMany({
@@ -1461,7 +1510,7 @@ export class CskhService implements OnModuleInit {
   }
 
   /** Thống kê nhanh theo khoảng ngày chấm điểm — không tải transcript. */
-  async getAuditDayStats(auditDateFrom: string, auditDateTo?: string, pageId?: string) {
+  async getAuditDayStats(auditDateFrom: string, auditDateTo?: string, pageId?: string, tenantId?: string) {
     const from = auditDateFrom.trim();
     const to = (auditDateTo?.trim() || from).trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
@@ -1493,6 +1542,7 @@ export class CskhService implements OnModuleInit {
                 AND COALESCE(metadata->>'auditDateFrom', '') = ''
               )
             )
+            AND (${tenantId}::uuid IS NULL OR tenant_id = ${tenantId}::uuid)
         `
       : await this.prisma.$queryRaw<StatsRow[]>`
           SELECT
@@ -1509,6 +1559,7 @@ export class CskhService implements OnModuleInit {
                 AND COALESCE(metadata->>'auditDateFrom', '') = ''
               )
             )
+            AND (${tenantId}::uuid IS NULL OR tenant_id = ${tenantId}::uuid)
         `;
 
     const row = rows[0];
@@ -1525,17 +1576,17 @@ export class CskhService implements OnModuleInit {
   }
 
   /** So sánh điểm NV / team (cùng page) / trung bình ngày — tính từ DB. */
-  async getAuditComparisonStats(auditDate: string, auditId: string) {
+  async getAuditComparisonStats(auditDate: string, auditId: string, tenantId?: string) {
     const day = auditDate.trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
       throw new BadRequestException('Ngày audit không hợp lệ (YYYY-MM-DD)');
     }
 
-    const audit = await this.prisma.chatAudit.findUnique({
-      where: { id: auditId },
+    const audit = await this.prisma.chatAudit.findFirst({
+      where: tenantId ? { id: auditId, tenantId } : { id: auditId },
       select: { id: true, score: true, agentName: true, metadata: true },
     });
-    if (!audit) throw new NotFoundException('Không tìm thấy audit');
+    if (!audit) throw new NotFoundException('Không tìm thấy audit hoặc không có quyền');
 
     const meta = (audit.metadata as Record<string, unknown> | null) ?? {};
     const auditDay = String(meta.auditDate ?? '');
@@ -1554,6 +1605,7 @@ export class CskhService implements OnModuleInit {
         metadata->>'pageName' AS page_name
       FROM chat_audits
       WHERE metadata->>'auditDate' = ${day}
+        AND (${tenantId}::uuid IS NULL OR tenant_id = ${tenantId}::uuid)
     `;
 
     const scores = rows.map((r) => r.score);
@@ -1590,12 +1642,12 @@ export class CskhService implements OnModuleInit {
   }
 
   /** Điểm chất lượng cùng hội thoại qua các ngày audit (nếu được quét nhiều lần). */
-  async getAuditScoreHistory(auditId: string) {
-    const audit = await this.prisma.chatAudit.findUnique({
-      where: { id: auditId },
+  async getAuditScoreHistory(auditId: string, tenantId?: string) {
+    const audit = await this.prisma.chatAudit.findFirst({
+      where: tenantId ? { id: auditId, tenantId } : { id: auditId },
       select: { id: true, score: true, metadata: true, createdAt: true },
     });
-    if (!audit) throw new NotFoundException('Không tìm thấy audit');
+    if (!audit) throw new NotFoundException('Không tìm thấy audit hoặc không có quyền');
 
     const meta = (audit.metadata as Record<string, unknown> | null) ?? {};
     const pageId = typeof meta.pageId === 'string' ? meta.pageId.trim() : '';
@@ -1625,6 +1677,7 @@ export class CskhService implements OnModuleInit {
             (${conversationId} <> '' AND metadata->>'conversationId' = ${conversationId})
             OR (${participantPsid} <> '' AND metadata->>'participantPsid' = ${participantPsid})
           )
+          AND (${tenantId}::uuid IS NULL OR tenant_id = ${tenantId}::uuid)
         ORDER BY COALESCE(metadata->>'auditDate', '') ASC, created_at ASC
       `;
     }
@@ -1902,7 +1955,7 @@ export class CskhService implements OnModuleInit {
   }
 
   /** Lấy audit theo jobRunId — dùng raw SQL vì Prisma JSON path filter không ổn định. */
-  private async listAuditsByJobRunId(jobRunId: string, limit: number) {
+  private async listAuditsByJobRunId(jobRunId: string, limit: number, tenantId?: string) {
     type AuditRow = {
       id: string;
       agentName: string | null;
@@ -1927,6 +1980,7 @@ export class CskhService implements OnModuleInit {
         created_at AS "createdAt"
       FROM chat_audits
       WHERE metadata->>'jobRunId' = ${jobRunId}
+        AND (${tenantId}::uuid IS NULL OR tenant_id = ${tenantId}::uuid)
       ORDER BY created_at DESC
       LIMIT ${limit}
     `;
@@ -1934,15 +1988,19 @@ export class CskhService implements OnModuleInit {
   }
 
   /** Một endpoint gộp: trạng thái job + kết quả audit từ DB (nguồn sự thật cho UI). */
-  async getAuditProgress(jobId: string) {
-    let job = await this.prisma.cskhJobRun.findUnique({ where: { id: jobId } });
-    if (!job) throw new NotFoundException('Job không tồn tại');
-    let audits = await this.listAuditsByJobRunId(jobId, 500);
+  async getAuditProgress(jobId: string, tenantId?: string) {
+    let job = await this.prisma.cskhJobRun.findFirst({
+      where: tenantId ? { id: jobId, tenantId } : { id: jobId },
+    });
+    if (!job) throw new NotFoundException('Job không tồn tại hoặc không có quyền');
+    let audits = await this.listAuditsByJobRunId(jobId, 500, tenantId);
     if (await this.failGhostJobIfNeeded(job, audits.length)) {
-      job = await this.prisma.cskhJobRun.findUnique({ where: { id: jobId } });
-      if (!job) throw new NotFoundException('Job không tồn tại');
+      job = await this.prisma.cskhJobRun.findFirst({
+        where: tenantId ? { id: jobId, tenantId } : { id: jobId },
+      });
+      if (!job) throw new NotFoundException('Job không tồn tại hoặc không có quyền');
     }
-    audits = await this.listAuditsByJobRunId(jobId, 500);
+    audits = await this.listAuditsByJobRunId(jobId, 500, tenantId);
     const summary = (job.summary as Record<string, unknown> | null) ?? {};
     return {
       id: job.id,

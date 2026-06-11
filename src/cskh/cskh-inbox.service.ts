@@ -106,20 +106,23 @@ export class CskhInboxService {
     conversationId: string,
     messages: CskhInboxMessage[],
     analyzeIntent = false,
+    tenantId?: string,
   ) {
     if (!messages.length) return;
     const freshConv = await this.prisma.cskhInboxConversation.findUnique({
       where: { id: conversationId },
     });
+    const finalTenantId = tenantId || freshConv?.tenantId || undefined;
     this.realtime.publish({
       type: 'message',
       pageId,
       conversationId,
       messages: messages.map((m) => this.formatMessageRow(m)),
       conversation: freshConv ? this.formatConversationRow(freshConv) : undefined,
+      tenantId: finalTenantId,
     });
     if (analyzeIntent && messages.some((m) => m.senderType === 'customer')) {
-      void this.analyzeAndBroadcastIntent(conversationId).catch((e) => {
+      void this.analyzeAndBroadcastIntent(conversationId, finalTenantId).catch((e) => {
         this.logger.warn(`Intent broadcast failed: ${(e as Error).message}`);
       });
     }
@@ -128,11 +131,12 @@ export class CskhInboxService {
   async getCustomerIntent(
     conversationId: string,
     auditId?: string,
+    tenantId?: string,
   ): Promise<CustomerIntentPayload> {
-    const conv = await this.prisma.cskhInboxConversation.findUnique({
-      where: { id: conversationId },
+    const conv = await this.prisma.cskhInboxConversation.findFirst({
+      where: tenantId ? { id: conversationId, tenantId } : { id: conversationId },
     });
-    if (!conv) throw new NotFoundException('Hội thoại không tồn tại');
+    if (!conv) throw new NotFoundException('Hội thoại không tồn tại hoặc không có quyền');
 
     const rows = await this.prisma.cskhInboxMessage.findMany({
       where: { conversationId },
@@ -143,8 +147,8 @@ export class CskhInboxService {
     let aiMessages: Array<{ sender: string; text: string }>;
     const auditKey = auditId?.trim() || '';
     if (auditKey) {
-      const audit = await this.prisma.chatAudit.findUnique({
-        where: { id: auditKey },
+      const audit = await this.prisma.chatAudit.findFirst({
+        where: tenantId ? { id: auditKey, tenantId } : { id: auditKey },
         select: { transcript: true },
       });
       if (audit?.transcript) {
@@ -194,9 +198,9 @@ export class CskhInboxService {
     return payload;
   }
 
-  private async analyzeAndBroadcastIntent(conversationId: string) {
-    const intent = await this.getCustomerIntent(conversationId);
-    this.realtime.publish({ type: 'intent', conversationId, intent });
+  private async analyzeAndBroadcastIntent(conversationId: string, tenantId?: string) {
+    const intent = await this.getCustomerIntent(conversationId, undefined, tenantId);
+    this.realtime.publish({ type: 'intent', conversationId, intent, tenantId });
   }
 
   verifyWebhookToken(mode: string, token: string, challenge: string) {
@@ -251,6 +255,7 @@ export class CskhInboxService {
               type: 'typing',
               conversationId: conv.id,
               pageId,
+              tenantId: conv.tenantId || undefined,
             });
           }
         }
@@ -280,6 +285,7 @@ export class CskhInboxService {
                 type: 'read-receipt',
                 conversationId: conv.id,
                 pageId,
+                tenantId: conv.tenantId || undefined,
               });
             }
           }
@@ -319,6 +325,7 @@ export class CskhInboxService {
         lastMessage: msg.text ?? '',
         lastMessageAt: new Date(event.timestamp ?? Date.now()),
         unreadCount: isFromPage ? 0 : 1,
+        tenantId: config?.tenantId || null,
       },
       update: {
         pageName: pageName ?? undefined,
@@ -327,6 +334,7 @@ export class CskhInboxService {
         lastMessage: msg.text ?? undefined,
         lastMessageAt: new Date(event.timestamp ?? Date.now()),
         unreadCount: isFromPage ? undefined : { increment: 1 },
+        tenantId: config?.tenantId || undefined,
       },
     });
 
@@ -441,6 +449,7 @@ export class CskhInboxService {
           attachmentUrl: item.url,
           sentAt,
           status: 'sent',
+          tenantId: config?.tenantId || null,
         },
       });
       createdMessages.push(created);
@@ -451,6 +460,7 @@ export class CskhInboxService {
       conv.id,
       createdMessages,
       createdMessages.some((m) => m.senderType === 'customer'),
+      conv.tenantId || undefined,
     );
   }
 
@@ -483,6 +493,7 @@ export class CskhInboxService {
         adTitle: parsed.adTitle,
         referralSource: parsed.referralSource,
         referralAt,
+        tenantId: config?.tenantId || null,
       },
       update: {
         pageName: pageName ?? undefined,
@@ -491,6 +502,7 @@ export class CskhInboxService {
         adTitle: parsed.adTitle ?? undefined,
         referralSource: parsed.referralSource ?? undefined,
         referralAt,
+        tenantId: config?.tenantId || undefined,
       },
     });
   }
@@ -513,9 +525,13 @@ export class CskhInboxService {
     });
   }
 
-  async listConversations(pageId?: string) {
+  async listConversations(pageId?: string, tenantId?: string) {
+    const where: any = {};
+    if (pageId) where.pageId = pageId;
+    if (tenantId) where.tenantId = tenantId;
+
     const rows = await this.prisma.cskhInboxConversation.findMany({
-      where: pageId ? { pageId } : {},
+      where,
       orderBy: { lastMessageAt: 'desc' },
       take: 200,
     });
@@ -571,11 +587,12 @@ export class CskhInboxService {
     since?: string,
     forceRefresh = false,
     limit?: number,
+    tenantId?: string,
   ) {
-    const conv = await this.prisma.cskhInboxConversation.findUnique({
-      where: { id: conversationId },
+    const conv = await this.prisma.cskhInboxConversation.findFirst({
+      where: tenantId ? { id: conversationId, tenantId } : { id: conversationId },
     });
-    if (!conv) throw new NotFoundException('Hội thoại không tồn tại');
+    if (!conv) throw new NotFoundException('Hội thoại không tồn tại hoặc không có quyền');
 
     const fetchLimit = limit
       ? Math.min(Math.max(Math.floor(limit), 10), this.auditRecheckMsgLimit)
@@ -596,6 +613,7 @@ export class CskhInboxService {
             conv.fbConversationId,
             config.pageAccessToken,
             fetchLimit,
+            tenantId,
           );
           this.lastGraphRefresh.set(conversationId, Date.now());
         }
@@ -638,6 +656,7 @@ export class CskhInboxService {
     fbConversationId: string,
     token: string,
     msgLimit = this.msgLimit,
+    tenantId?: string,
   ) {
     try {
       const safeLimit = Math.min(Math.max(msgLimit, 10), this.auditRecheckMsgLimit);
@@ -656,7 +675,7 @@ export class CskhInboxService {
 
       let lastPreview: string | null = null;
       for (const msg of ordered) {
-        const saved = await this.persistGraphMessage(conversationId, pageId, msg, token);
+        const saved = await this.persistGraphMessage(conversationId, pageId, msg, token, tenantId);
         if (saved) lastPreview = saved.text;
       }
 
@@ -895,6 +914,7 @@ export class CskhInboxService {
     pageId: string,
     msg: FbMessage,
     token?: string,
+    tenantId?: string,
   ): Promise<{ text: string } | null> {
     let enriched = msg;
     if (token) {
@@ -990,6 +1010,7 @@ export class CskhInboxService {
           ...payload,
           sentAt,
           status: 'sent',
+          tenantId,
         },
       });
       return { text: normalized.text };
@@ -1058,6 +1079,7 @@ export class CskhInboxService {
           ...payload,
           sentAt,
           status: 'sent',
+          tenantId,
         },
       });
     }
@@ -1214,17 +1236,17 @@ export class CskhInboxService {
     };
   }
 
-  async sendMessage(conversationId: string, text: string) {
+  async sendMessage(conversationId: string, text: string, tenantId?: string) {
     const trimmed = text.trim();
     if (!trimmed) throw new BadRequestException('Tin nhắn trống');
 
-    const conv = await this.prisma.cskhInboxConversation.findUnique({
-      where: { id: conversationId },
+    const conv = await this.prisma.cskhInboxConversation.findFirst({
+      where: tenantId ? { id: conversationId, tenantId } : { id: conversationId },
     });
-    if (!conv) throw new NotFoundException('Hội thoại không tồn tại');
+    if (!conv) throw new NotFoundException('Hội thoại không tồn tại hoặc không có quyền');
 
-    const config = await this.prisma.facebookCskhConfig.findUnique({
-      where: { pageId: conv.pageId },
+    const config = await this.prisma.facebookCskhConfig.findFirst({
+      where: tenantId ? { pageId: conv.pageId, tenantId } : { pageId: conv.pageId },
     });
     if (!config?.pageAccessToken) {
       throw new BadRequestException('Page chưa có access token');
@@ -1237,6 +1259,7 @@ export class CskhInboxService {
         senderType: 'staff',
         text: trimmed,
         status: 'pending',
+        tenantId,
       },
     });
 
@@ -1263,7 +1286,7 @@ export class CskhInboxService {
           unreadCount: 0,
         },
       });
-      await this.publishMessageRealtime(conv.pageId, conv.id, [sent], false);
+      await this.publishMessageRealtime(conv.pageId, conv.id, [sent], false, tenantId);
       return sent;
     } catch (e) {
       await this.prisma.cskhInboxMessage.update({
@@ -1275,37 +1298,40 @@ export class CskhInboxService {
   }
 
   /** Broadcast typing indicator event qua SSE. */
-  async notifyTyping(conversationId: string) {
-    const conv = await this.prisma.cskhInboxConversation.findUnique({
-      where: { id: conversationId },
+  async notifyTyping(conversationId: string, tenantId?: string) {
+    const conv = await this.prisma.cskhInboxConversation.findFirst({
+      where: tenantId ? { id: conversationId, tenantId } : { id: conversationId },
     });
-    if (!conv) throw new NotFoundException('Hội thoại không tồn tại');
+    if (!conv) throw new NotFoundException('Hội thoại không tồn tại hoặc không có quyền');
 
     this.realtime.publish({
       type: 'typing',
       conversationId,
       pageId: conv.pageId,
+      tenantId: conv.tenantId || undefined,
     });
   }
 
   /** Đánh dấu tin nhắn từ khách là đã đọc. */
-  async markAsRead(conversationId: string) {
-    const conv = await this.prisma.cskhInboxConversation.findUnique({
-      where: { id: conversationId },
+  async markAsRead(conversationId: string, tenantId?: string) {
+    const conv = await this.prisma.cskhInboxConversation.findFirst({
+      where: tenantId ? { id: conversationId, tenantId } : { id: conversationId },
     });
-    if (!conv) throw new NotFoundException('Hội thoại không tồn tại');
+    if (!conv) throw new NotFoundException('Hội thoại không tồn tại hoặc không có quyền');
 
     const updatedConv = await this.prisma.cskhInboxConversation.update({
       where: { id: conversationId },
       data: { unreadCount: 0 },
     });
 
+    const where: any = {
+      conversationId,
+      direction: 'inbound',
+      status: { notIn: ['read', 'failed'] },
+    };
+    if (tenantId) where.tenantId = tenantId;
     const updated = await this.prisma.cskhInboxMessage.updateMany({
-      where: {
-        conversationId,
-        direction: 'inbound',
-        status: { notIn: ['read', 'failed'] },
-      },
+      where,
       data: { status: 'read' },
     });
 
@@ -1314,16 +1340,18 @@ export class CskhInboxService {
       conversationId,
       pageId: conv.pageId,
       conversation: this.formatConversationRow(updatedConv),
+      tenantId: conv.tenantId || undefined,
     });
 
     return { markedAsRead: updated.count };
   }
 
   /** Đồng bộ inbox từ Graph API (khi chưa có webhook hoặc refresh). */
-  async syncFromGraph(pageId?: string) {
-    const pages = pageId
-      ? await this.prisma.facebookCskhConfig.findMany({ where: { pageId } })
-      : await this.prisma.facebookCskhConfig.findMany();
+  async syncFromGraph(pageId?: string, tenantId?: string) {
+    const where: any = {};
+    if (pageId) where.pageId = pageId;
+    if (tenantId) where.tenantId = tenantId;
+    const pages = await this.prisma.facebookCskhConfig.findMany({ where });
 
     let synced = 0;
     for (const page of pages) {
@@ -1372,6 +1400,7 @@ export class CskhInboxService {
             customerPictureUrl,
             lastMessage: rawMsgs[0]?.message ?? null,
             lastMessageAt: fbConv.updated_time ? new Date(fbConv.updated_time) : new Date(),
+            tenantId: page.tenantId,
           },
           update: {
             pageName: page.pageName ?? undefined,
@@ -1380,6 +1409,7 @@ export class CskhInboxService {
             customerPictureUrl: customerPictureUrl ?? undefined,
             lastMessage: rawMsgs[0]?.message ?? undefined,
             lastMessageAt: fbConv.updated_time ? new Date(fbConv.updated_time) : undefined,
+            tenantId: page.tenantId ?? undefined,
           },
         });
 
@@ -1391,6 +1421,7 @@ export class CskhInboxService {
             page.pageId,
             msg,
             page.pageAccessToken,
+            page.tenantId || undefined,
           );
           if (saved) {
             lastPreview = saved.text;
@@ -1412,7 +1443,7 @@ export class CskhInboxService {
   }
 
   /** Liên kết inbox từ metadata audit — dùng PSID hoặc FB conversation id lưu trong audit. */
-  async linkFromAudit(auditId: string) {
+  async linkFromAudit(auditId: string, tenantId?: string) {
     type AuditMeta = {
       pageId?: string;
       conversationId?: string;
@@ -1420,14 +1451,18 @@ export class CskhInboxService {
       pageName?: string;
     };
 
-    const audit = await this.prisma.chatAudit.findUnique({ where: { id: auditId } });
-    if (!audit) throw new NotFoundException('Audit không tồn tại');
+    const audit = await this.prisma.chatAudit.findFirst({
+      where: tenantId ? { id: auditId, tenantId } : { id: auditId },
+    });
+    if (!audit) throw new NotFoundException('Audit không tồn tại hoặc không có quyền');
 
     const meta = (audit.metadata as AuditMeta | null) ?? {};
     const pageId = meta.pageId?.trim();
     if (!pageId) throw new BadRequestException('Audit thiếu pageId');
 
-    const page = await this.prisma.facebookCskhConfig.findUnique({ where: { pageId } });
+    const page = await this.prisma.facebookCskhConfig.findFirst({
+      where: tenantId ? { pageId, tenantId } : { pageId },
+    });
     if (!page?.pageAccessToken) {
       throw new BadRequestException('Page chưa được kết nối OAuth');
     }
@@ -1453,8 +1488,8 @@ export class CskhInboxService {
       );
     }
 
-    const existing = await this.prisma.cskhInboxConversation.findUnique({
-      where: { pageId_participantPsid: { pageId, participantPsid } },
+    const existing = await this.prisma.cskhInboxConversation.findFirst({
+      where: tenantId ? { pageId, participantPsid, tenantId } : { pageId, participantPsid },
     });
     if (existing) return existing;
 
@@ -1483,6 +1518,7 @@ export class CskhInboxService {
         customerPictureUrl,
         lastMessage: rawMsgs[0]?.message ?? null,
         lastMessageAt: updatedTime ? new Date(updatedTime) : new Date(),
+        tenantId: page.tenantId,
       },
       update: {
         pageName: page.pageName ?? undefined,
@@ -1491,6 +1527,7 @@ export class CskhInboxService {
         customerPictureUrl: customerPictureUrl ?? undefined,
         lastMessage: rawMsgs[0]?.message ?? undefined,
         lastMessageAt: updatedTime ? new Date(updatedTime) : undefined,
+        tenantId: page.tenantId ?? undefined,
       },
     });
 
@@ -1503,6 +1540,7 @@ export class CskhInboxService {
           pageId,
           msg,
           page.pageAccessToken,
+          page.tenantId || undefined,
         );
         if (saved) lastPreview = saved.text;
       }
@@ -1517,11 +1555,11 @@ export class CskhInboxService {
     return conv;
   }
 
-  async getLatestAuditForConversation(conversationId: string) {
-    const conv = await this.prisma.cskhInboxConversation.findUnique({
-      where: { id: conversationId },
+  async getLatestAuditForConversation(conversationId: string, tenantId?: string) {
+    const conv = await this.prisma.cskhInboxConversation.findFirst({
+      where: tenantId ? { id: conversationId, tenantId } : { id: conversationId },
     });
-    if (!conv) throw new NotFoundException('Hội thoại không tồn tại');
+    if (!conv) throw new NotFoundException('Hội thoại không tồn tại hoặc không có quyền');
 
     type Row = {
       id: string;
@@ -1538,6 +1576,7 @@ export class CskhInboxService {
              agent_name AS "agentName", created_at AS "createdAt"
       FROM chat_audits
       WHERE metadata->>'pageId' = ${conv.pageId}
+        AND (${tenantId}::uuid IS NULL OR tenant_id = ${tenantId}::uuid)
       ORDER BY created_at DESC
       LIMIT 100
     `;
