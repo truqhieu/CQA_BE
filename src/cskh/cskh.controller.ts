@@ -28,7 +28,10 @@ import { verifyFacebookWebhookSignature } from './facebook-oauth.util';
 import { parseMediaProxyUrlFromRequest } from './facebook-message.util';
 import { SapoOAuthService } from './sapo-oauth.service';
 import { SapoProductService } from './sapo-product.service';
+import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 
+@ApiTags('cskh')
+@ApiBearerAuth('JWT-auth')
 @Controller('cskh')
 export class CskhController {
   constructor(

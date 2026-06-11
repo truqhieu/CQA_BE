@@ -8,6 +8,7 @@ import {
   UseGuards,
   Request,
 } from '@nestjs/common';
+import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
@@ -16,6 +17,7 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import type { User } from '@prisma/client';
 
+@ApiTags('auth')
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
@@ -55,6 +57,7 @@ export class AuthController {
 
   // GET /auth/me
   @Get('me')
+  @ApiBearerAuth('JWT-auth')
   @UseGuards(JwtAuthGuard)
   async getProfile(@CurrentUser() user: User) {
     return {
@@ -66,6 +69,7 @@ export class AuthController {
 
   // POST /auth/logout
   @Post('logout')
+  @ApiBearerAuth('JWT-auth')
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   async logout(@Request() req: any) {
