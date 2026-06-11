@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  # AI Service Container
+  cqa-ai:
+    image: viejhaf/cqa-ai:latest
+    container_name: cqa-ai
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env.ai
+    restart: unless-stopped
+
+  # Backend Container
+  cqa-be:
+    image: viejhaf/cqa-be:latest
+    container_name: cqa-be
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.be
+    restart: unless-stopped
+    depends_on:
+      - cqa-ai
