@@ -524,55 +524,65 @@ export class CskhService implements OnModuleInit {
     source: 'oauth' | 'refresh',
     tenantId?: string,
   ) {
-    let saved = 0;
-    for (const acc of accounts) {
-      if (!acc.id || !acc.access_token) continue;
-      const canMessage = !acc.tasks?.length || acc.tasks.includes('MESSAGING');
-      const pictureUrl = acc.picture?.data?.url ?? null;
-      const existing = await this.prisma.facebookCskhConfig.findUnique({
-        where: { pageId: acc.id },
-        select: { metadata: true },
-      });
-      const prevMeta = (existing?.metadata as Record<string, unknown>) || {};
-      const meta = {
-        ...prevMeta,
-        connectedVia: source,
-        tasks: acc.tasks || [],
-        ...(pictureUrl ? { pictureUrl } : {}),
-        refreshedAt: new Date().toISOString(),
-      } as Prisma.InputJsonValue;
-
-      await this.prisma.facebookCskhConfig.upsert({
-        where: { pageId: acc.id },
-        create: {
-          pageId: acc.id,
-          pageName: acc.name || null,
-          pageAccessToken: acc.access_token,
-          enabled: canMessage,
-          tenantId,
-          metadata: {
+    const validAccounts = accounts.filter((acc) => acc.id && acc.access_token);
+    
+    // Process all pages concurrently using Promise.all
+    const results = await Promise.all(
+      validAccounts.map(async (acc) => {
+        try {
+          const canMessage = !acc.tasks?.length || acc.tasks.includes('MESSAGING');
+          const pictureUrl = acc.picture?.data?.url ?? null;
+          const existing = await this.prisma.facebookCskhConfig.findUnique({
+            where: { pageId: acc.id },
+            select: { metadata: true },
+          });
+          const prevMeta = (existing?.metadata as Record<string, unknown>) || {};
+          const meta = {
+            ...prevMeta,
             connectedVia: source,
             tasks: acc.tasks || [],
             ...(pictureUrl ? { pictureUrl } : {}),
-          } as Prisma.InputJsonValue,
-        },
-        update: {
-          pageName: acc.name || undefined,
-          pageAccessToken: acc.access_token,
-          enabled: canMessage,
-          tenantId,
-          metadata: meta,
-        },
-      });
+            refreshedAt: new Date().toISOString(),
+          } as Prisma.InputJsonValue;
 
-      // Auto subscribe to webhooks
-      await this.subscribePageToWebhook(acc.id, acc.access_token).catch((e) => {
-        this.logger.error(`Auto subscribe failed for page ${acc.id} via OAuth: ${e.message}`);
-      });
+          await this.prisma.facebookCskhConfig.upsert({
+            where: { pageId: acc.id },
+            create: {
+              pageId: acc.id,
+              pageName: acc.name || null,
+              pageAccessToken: acc.access_token,
+              enabled: canMessage,
+              tenantId,
+              metadata: {
+                connectedVia: source,
+                tasks: acc.tasks || [],
+                ...(pictureUrl ? { pictureUrl } : {}),
+              } as Prisma.InputJsonValue,
+            },
+            update: {
+              pageName: acc.name || undefined,
+              pageAccessToken: acc.access_token,
+              enabled: canMessage,
+              tenantId,
+              metadata: meta,
+            },
+          });
 
-      saved++;
-    }
-    return saved;
+          // Auto subscribe to webhooks
+          await this.subscribePageToWebhook(acc.id, acc.access_token).catch((e) => {
+            this.logger.error(`Auto subscribe failed for page ${acc.id} via OAuth: ${e.message}`);
+          });
+
+          return true;
+        } catch (e: any) {
+          this.logger.error(`Failed to upsert page ${acc.id} via ${source}: ${e.message}`);
+          return false;
+        }
+      }),
+    );
+
+    const savedCount = results.filter(Boolean).length;
+    return savedCount;
   }
 
   async handleOAuthCallback(code: string, state: string) {
