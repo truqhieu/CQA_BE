@@ -7,8 +7,12 @@ import {
   HttpStatus,
   UseGuards,
   Request,
+  Res,
+  Query,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
+import { ConfigService } from '@nestjs/config';
+import type { Response } from 'express';
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
@@ -20,7 +24,10 @@ import type { User } from '@prisma/client';
 @ApiTags('auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly configService: ConfigService,
+  ) {}
 
   // POST /auth/register
   @Post('register')
@@ -78,5 +85,60 @@ export class AuthController {
       success: true,
       message: 'Đăng xuất thành công',
     };
+  }
+
+  // GET /auth/google
+  @Get('google')
+  async googleAuth(@Res() res: Response) {
+    const clientId = this.configService.get<string>('GOOGLE_CLIENT_ID');
+    const callbackUrl = this.configService.get<string>('GOOGLE_CALLBACK_URL');
+    if (!clientId || !callbackUrl) {
+      return res.status(400).json({
+        success: false,
+        message: 'Google login is not configured on the server',
+      });
+    }
+
+    const googleUrl =
+      `https://accounts.google.com/o/oauth2/v2/auth?` +
+      `response_type=code` +
+      `&client_id=${encodeURIComponent(clientId)}` +
+      `&redirect_uri=${encodeURIComponent(callbackUrl)}` +
+      `&scope=openid%20profile%20email` +
+      `&prompt=select_account`;
+
+    return res.redirect(googleUrl);
+  }
+
+  // GET /auth/google/callback
+  @Get('google/callback')
+  async googleAuthCallback(
+    @Query('code') code: string,
+    @Query('error') error: string,
+    @Res() res: Response,
+  ) {
+    const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:5173';
+
+    if (error) {
+      return res.redirect(
+        `${frontendUrl}/login?error=${encodeURIComponent('Google login rejected: ' + error)}`,
+      );
+    }
+
+    if (!code) {
+      return res.redirect(
+        `${frontendUrl}/login?error=${encodeURIComponent('No authorization code provided')}`,
+      );
+    }
+
+    try {
+      const tokens = await this.authService.loginWithGoogle(code);
+      return res.redirect(
+        `${frontendUrl}/login?token=${tokens.accessToken}&refreshToken=${tokens.refreshToken}`,
+      );
+    } catch (err: any) {
+      const errMsg = err.message || 'Đăng nhập Google thất bại';
+      return res.redirect(`${frontendUrl}/login?error=${encodeURIComponent(errMsg)}`);
+    }
   }
 }

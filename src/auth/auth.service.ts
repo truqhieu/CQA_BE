@@ -11,6 +11,8 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { JwtPayload } from './interfaces/jwt-payload.interface';
 import { User } from '@prisma/client';
+import axios from 'axios';
+import * as crypto from 'crypto';
 
 @Injectable()
 export class AuthService {
@@ -126,5 +128,78 @@ export class AuthService {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { password, ...result } = user;
     return result;
+  }
+
+  // ─── Google OAuth2 Login / Register ──────────────────────────────────────────
+  async loginWithGoogle(code: string) {
+    const clientId = this.configService.get<string>('GOOGLE_CLIENT_ID');
+    const clientSecret = this.configService.get<string>('GOOGLE_CLIENT_SECRET');
+    const callbackUrl = this.configService.get<string>('GOOGLE_CALLBACK_URL');
+
+    if (!clientId || !clientSecret || !callbackUrl) {
+      throw new BadRequestException('Google credentials are not configured on the server');
+    }
+
+    // 1. Exchange authorization code for Google access token
+    let googleAccessToken: string;
+    try {
+      const tokenResponse = await axios.post('https://oauth2.googleapis.com/token', {
+        code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: callbackUrl,
+        grant_type: 'authorization_code',
+      });
+      googleAccessToken = tokenResponse.data.access_token;
+    } catch (err: any) {
+      throw new BadRequestException(
+        'Failed to exchange code with Google: ' +
+          (err.response?.data?.error_description || err.message),
+      );
+    }
+
+    // 2. Retrieve user profile using Google access token
+    let profile: { email: string; name: string; picture?: string };
+    try {
+      const profileResponse = await axios.get('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: `Bearer ${googleAccessToken}` },
+      });
+      profile = profileResponse.data;
+    } catch (err: any) {
+      throw new BadRequestException('Failed to retrieve profile from Google: ' + err.message);
+    }
+
+    if (!profile.email) {
+      throw new BadRequestException('Google profile does not contain email');
+    }
+
+    // 3. Find or create user in database
+    let user = await this.usersService.findByEmail(profile.email);
+    if (!user) {
+      const randomPassword = crypto.randomUUID();
+      const hashedPassword = await bcrypt.hash(randomPassword, 12);
+      user = await this.usersService.create({
+        email: profile.email,
+        fullName: profile.name || profile.email.split('@')[0],
+        password: hashedPassword,
+        avatarUrl: profile.picture,
+      });
+    } else {
+      // Optionally update user's avatar if not set
+      if (!user.avatarUrl && profile.picture) {
+        user = await this.usersService.update(user.id, { avatarUrl: profile.picture });
+      }
+    }
+
+    if (!user.isActive) {
+      throw new UnauthorizedException('Tài khoản đã bị khóa');
+    }
+
+    // 4. Generate system access and refresh tokens
+    const tokens = await this.generateTokens(user);
+    return {
+      user: this.sanitizeUser(user),
+      ...tokens,
+    };
   }
 }
