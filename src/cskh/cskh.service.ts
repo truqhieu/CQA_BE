@@ -266,7 +266,7 @@ export class CskhService implements OnModuleInit {
   }
 
   defaultOAuthReturnUrl(): string {
-    return `${this.frontendUrl()}/cskh-quality?tab=config`;
+    return `${this.frontendUrl()}/settings?tab=channel`;
   }
 
   getOAuthStartUrl(returnUrl?: string, tenantId?: string) {
