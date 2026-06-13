@@ -537,4 +537,10 @@ export class CskhController {
   ) {
     return this.cskh.streamCustomerAvatar(pageId, psid, res);
   }
+
+  @Get('dashboard/stats')
+  @UseGuards(JwtAuthGuard)
+  getDashboardStats(@CurrentUser() user: User) {
+    return this.cskh.getDashboardStats(user.tenantId || undefined);
+  }
 }

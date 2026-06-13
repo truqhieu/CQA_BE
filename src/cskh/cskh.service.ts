@@ -2051,4 +2051,65 @@ export class CskhService implements OnModuleInit {
       throw e;
     }
   }
+
+  async getDashboardStats(tenantId?: string) {
+    const whereTenant = tenantId ? { tenantId } : {};
+
+    const [
+      totalPages,
+      enabledPages,
+      totalAudits,
+      avgScoreResult,
+      totalConversations,
+      totalMessages,
+      recentAudits,
+      latestJobs,
+    ] = await Promise.all([
+      this.prisma.facebookCskhConfig.count({ where: whereTenant }),
+      this.prisma.facebookCskhConfig.count({ where: { ...whereTenant, enabled: true } }),
+      this.prisma.chatAudit.count({ where: whereTenant }),
+      this.prisma.chatAudit.aggregate({
+        where: whereTenant,
+        _avg: { score: true },
+      }),
+      this.prisma.cskhInboxConversation.count({ where: whereTenant }),
+      this.prisma.cskhInboxMessage.count({ where: whereTenant }),
+      this.prisma.chatAudit.findMany({
+        where: whereTenant,
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+      }),
+      this.prisma.cskhJobRun.findMany({
+        where: whereTenant,
+        orderBy: { startedAt: 'desc' },
+        take: 5,
+      }),
+    ]);
+
+    const avgScore = avgScoreResult._avg.score ? Math.round(avgScoreResult._avg.score) : 0;
+
+    return {
+      totalPages,
+      enabledPages,
+      totalAudits,
+      avgScore,
+      totalConversations,
+      totalMessages,
+      recentAudits: recentAudits.map((a) => ({
+        id: a.id,
+        agentName: a.agentName,
+        customerName: a.customerName,
+        channel: a.channel,
+        score: a.score,
+        createdAt: a.createdAt,
+      })),
+      latestJobs: latestJobs.map((j) => ({
+        id: j.id,
+        type: j.type,
+        status: j.status,
+        startedAt: j.startedAt,
+        finishedAt: j.finishedAt,
+      })),
+    };
+  }
 }
